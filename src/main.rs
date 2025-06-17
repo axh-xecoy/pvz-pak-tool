@@ -2,7 +2,7 @@ use clap::Parser;
 
 // 导入库模块
 use pvz_pak_tool::cli::Cli;
-use pvz_pak_tool::{pack_to_pak, unpack_pak, run_repl};
+use pvz_pak_tool::{pack_to_pak, unpack_pak, run_repl, run_batch_commands};
 
 #[cfg(windows)]
 use colored::control;
@@ -33,12 +33,30 @@ fn main() {
             eprintln!("  - 解包: 输入应为 .pak 文件");
             std::process::exit(1);
         }
-    } else {
-        // 没有输出路径，进入REPL模式
+    } else if !cli.commands.is_empty() {
+        // 有命令参数，执行批处理模式
         if cli.input.extension().map_or(false, |ext| ext == "pak") {
+            run_batch_commands(&cli.input, &cli.commands)
+        } else {
+            eprintln!("错误: 批处理模式需要 .pak 文件作为输入");
+            std::process::exit(1);
+        }
+    } else {
+        // 没有输出路径也没有命令
+        if cli.input.is_dir() {
+            // 输入是目录但没有指定输出，要求指定输出PAK文件
+            eprintln!("错误: 打包目录需要指定输出PAK文件");
+            eprintln!("用法: pkt <目录> -o <输出.pak文件>");
+            std::process::exit(1);
+        } else if cli.input.extension().map_or(false, |ext| ext == "pak") {
+            // 输入是PAK文件，进入REPL模式
             run_repl(&cli.input)
         } else {
-            eprintln!("错误: REPL模式需要 .pak 文件作为输入");
+            eprintln!("错误: 无法识别的输入类型");
+            eprintln!("  - 打包: pkt <目录> -o <输出.pak文件>");
+            eprintln!("  - 解包: pkt <输入.pak文件> -o <输出目录>");
+            eprintln!("  - REPL: pkt <输入.pak文件>");
+            eprintln!("  - 批处理: pkt <输入.pak文件> -c '命令1' -c '命令2'");
             std::process::exit(1);
         }
     };

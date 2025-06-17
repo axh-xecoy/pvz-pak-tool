@@ -17,8 +17,8 @@ pub fn get_styles() -> clap::builder::Styles {
 #[command(
     author = "PVZ PAK Tool",
     version,
-    about = "🌱 PVZ PAK文件操作工具 - 植物大战僵尸资源包管理器",
-    long_about = "一个强大的Plants vs Zombies PAK文件操作工具，支持打包和解包操作。\n\n支持的操作：\n  • 解包 .pak 文件到目录\n  • 将目录打包为 .pak 文件\n  • 交互式文件浏览器（REPL模式）",
+    about = "PVZ PAK文件操作工具 - 植物大战僵尸资源包管理器",
+    long_about = "一个强大的Plants vs Zombies PAK文件操作工具，支持打包和解包操作。\n\n支持的操作：\n  • 解包 .pak 文件到目录\n  • 将目录打包为 .pak 文件\n  • 交互式文件浏览器（REPL模式）\n  • 批处理命令执行（-c 模式）",
     color = ColorChoice::Auto,
     styles = get_styles()
 )]
@@ -39,4 +39,14 @@ pub struct Cli {
         help = "输出路径（目录或.pak文件）"
     )]
     pub output: Option<PathBuf>,
+    
+    /// 执行命令后退出（批处理模式）
+    #[arg(
+        short = 'c',
+        long = "command",
+        value_name = "COMMAND",
+        help = "要执行的命令（可多次使用）",
+        action = clap::ArgAction::Append
+    )]
+    pub commands: Vec<String>,
 } 

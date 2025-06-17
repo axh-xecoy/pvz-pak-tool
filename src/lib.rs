@@ -9,5 +9,5 @@ pub mod utils;
 pub use pak::{FileInfo, PakInfo};
 pub use pack::pack_to_pak;
 pub use unpack::unpack_pak;
-pub use repl::run_repl;
+pub use repl::{run_repl, run_batch_commands};
 pub use utils::{ensure_directory_exists, is_directory_empty}; 

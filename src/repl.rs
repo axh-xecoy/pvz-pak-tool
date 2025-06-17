@@ -1,9 +1,10 @@
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 use colored::*;
+use regex::Regex;
 use crate::pak::{parse_pak_info, FileInfo, show_pak_info_simple};
-use crate::utils::crypt_data;
+use crate::utils::{crypt_data, ensure_directory_exists};
 
 /// 输出重定向目标
 enum OutputTarget {
@@ -45,46 +46,90 @@ impl OutputBuffer {
 
 /// 格式化文件信息
 fn format_file_info(file: &FileInfo, format_str: Option<&str>) -> String {
+    format_file_info_with_captures(file, format_str, None)
+}
+
+/// 格式化文件信息（支持正则表达式捕获组）
+fn format_file_info_with_captures(file: &FileInfo, format_str: Option<&str>, captures: Option<&regex::Captures>) -> String {
     let default_format = "$path";
-    let format = format_str.unwrap_or(default_format);
+    let mut format = format_str.unwrap_or(default_format).to_string();
     
-    // 提取文件信息
-    let full_path = &file.file_name;
-    let file_name = full_path.split('\\').last().unwrap_or(full_path);
-    let dir_path = if let Some(pos) = full_path.rfind('\\') {
-        &full_path[..pos]
+    // 提取文件信息，转换为Unix风格路径用于显示
+    let full_path_unix = file.file_name.replace('\\', "/");
+    let file_name = full_path_unix.split('/').last().unwrap_or(&full_path_unix);
+    let dir_path = if let Some(pos) = full_path_unix.rfind('/') {
+        &full_path_unix[..pos]
     } else {
         ""
     };
     
-    // 替换格式变量
-    format
-        .replace("$path", full_path)
+    // 先处理正则表达式捕获组
+    if let Some(caps) = captures {
+        // 替换 $1, $2, $3 等捕获组引用
+        for i in 1..caps.len() {
+            if let Some(capture) = caps.get(i) {
+                format = format.replace(&format!("${}", i), capture.as_str());
+            }
+        }
+        // 替换 $0 为完整匹配
+        if let Some(full_match) = caps.get(0) {
+            format = format.replace("$0", full_match.as_str());
+        }
+    }
+    
+    // 然后替换标准格式变量
+    format = format
+        .replace("$path", &full_path_unix)
         .replace("$name", file_name)
         .replace("$dir", dir_path)
         .replace("$size", &file.z_size.to_string())
-        .replace("$osize", &file._size.to_string())
+        .replace("$osize", &file._size.to_string());
+    
+    format
 }
 
 /// 格式化目录信息
 fn format_dir_info(dir_path: &str, format_str: Option<&str>) -> String {
+    format_dir_info_with_captures(dir_path, format_str, None)
+}
+
+/// 格式化目录信息（支持正则表达式捕获组）
+fn format_dir_info_with_captures(dir_path: &str, format_str: Option<&str>, captures: Option<&regex::Captures>) -> String {
     let default_format = "$path";
-    let format = format_str.unwrap_or(default_format);
+    let mut format = format_str.unwrap_or(default_format).to_string();
     
-    let dir_name = dir_path.split('\\').last().unwrap_or(dir_path);
-    let parent_path = if let Some(pos) = dir_path.rfind('\\') {
-        &dir_path[..pos]
+    // 转换为Unix风格路径用于显示
+    let dir_path_unix = dir_path.replace('\\', "/");
+    let dir_name = dir_path_unix.split('/').last().unwrap_or(&dir_path_unix);
+    let parent_path = if let Some(pos) = dir_path_unix.rfind('/') {
+        &dir_path_unix[..pos]
     } else {
         ""
     };
     
-    // 替换格式变量（目录没有大小信息）
-    format
-        .replace("$path", dir_path)
+    // 先处理正则表达式捕获组
+    if let Some(caps) = captures {
+        // 替换 $1, $2, $3 等捕获组引用
+        for i in 1..caps.len() {
+            if let Some(capture) = caps.get(i) {
+                format = format.replace(&format!("${}", i), capture.as_str());
+            }
+        }
+        // 替换 $0 为完整匹配
+        if let Some(full_match) = caps.get(0) {
+            format = format.replace("$0", full_match.as_str());
+        }
+    }
+    
+    // 然后替换标准格式变量（目录没有大小信息）
+    format = format
+        .replace("$path", &dir_path_unix)
         .replace("$name", dir_name)
         .replace("$dir", parent_path)
         .replace("$size", "<DIR>")
-        .replace("$osize", "<DIR>")
+        .replace("$osize", "<DIR>");
+    
+    format
 }
 
 /// 解析命令行，提取命令和重定向信息
@@ -330,6 +375,246 @@ impl PakFileSystem {
     }
 }
 
+/// 批处理模式：执行命令列表后退出
+pub fn run_batch_commands(pak_path: &Path, commands: &[String]) -> io::Result<()> {
+    // 读取并解析PAK文件
+    let mut data = fs::read(pak_path)?;
+    
+    // 检测是否加密
+    let encrypted = detect_encryption(&data);
+    
+    if encrypted {
+        crypt_data(&mut data);
+    }
+    
+    // 解析PAK信息
+    let (pak_info, _header_size) = parse_pak_info(&data)?;
+    
+    // 创建文件系统
+    let mut fs = PakFileSystem::new(pak_info.file_info_library);
+    
+    // 依次执行每个命令
+    for (index, command_str) in commands.iter().enumerate() {
+        // 解析命令和重定向
+        let (cmd, output_target) = parse_command_line(command_str);
+        let parts = parse_command_args(&cmd);
+        
+        if parts.is_empty() {
+            continue;
+        }
+        
+        let command = &parts[0];
+        let mut output = OutputBuffer::new();
+        
+        // 执行命令（复用REPL中的命令处理逻辑）
+        let result = execute_command(&mut fs, &data, encrypted, &parts, &mut output);
+        
+        // 输出结果
+        if let Err(e) = result {
+            eprintln!("执行命令 {} 时出错: {}", index + 1, e);
+            return Err(e);
+        } else if let Err(e) = output.flush_to(&output_target) {
+            eprintln!("输出重定向时出错: {}", e);
+            return Err(e);
+        }
+    }
+    
+    Ok(())
+}
+
+/// 执行单个命令
+fn execute_command(
+    fs: &mut PakFileSystem,
+    data: &[u8],
+    encrypted: bool,
+    parts: &[String],
+    output: &mut OutputBuffer
+) -> io::Result<()> {
+    let command = parts.get(0).map(|s| s.as_str()).unwrap_or("");
+    
+    match command {
+        "help" | "h" => {
+            show_help_to_buffer(output);
+            Ok(())
+        },
+        "ls" | "dir" => {
+            let target_path = if parts.len() > 1 {
+                &parts[1]
+            } else {
+                ""
+            };
+            
+            list_directory_to_buffer(fs, target_path, output);
+            Ok(())
+        },
+        "cd" => {
+            if parts.len() > 1 {
+                match fs.change_directory(&parts[1]) {
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        output.writeln(format!("错误: {}", e));
+                        Ok(())
+                    }
+                }
+            } else {
+                fs.current_path = "/".to_string();
+                Ok(())
+            }
+        },
+        "find" => {
+            execute_find_command(fs, data, parts, output)
+        },
+        "info" => {
+            show_pak_info_to_buffer(data, encrypted, &fs.files, output);
+            Ok(())
+        },
+        _ => {
+            output.writeln(format!("{}", format!("未知命令: {}. 输入 'help' 查看可用命令", command).red()));
+            Ok(())
+        }
+    }
+}
+
+/// 执行find命令
+fn execute_find_command(
+    fs: &PakFileSystem,
+    data: &[u8],
+    parts: &[String],
+    output: &mut OutputBuffer
+) -> io::Result<()> {
+    let mut format_str = None;
+    let mut search_type = None;
+    let mut search_value = None;
+    let mut show_help = false;
+    let mut parse_error = false;
+    let mut extract_dir = None;
+    
+    // 解析find命令参数
+    let mut i = 1;
+    while i < parts.len() {
+        match parts[i].as_str() {
+            "-help" | "--help" => {
+                show_help = true;
+                break;
+            },
+            "-name" => {
+                if i + 1 < parts.len() {
+                    search_type = Some("name");
+                    search_value = Some(&parts[i + 1]);
+                    i += 2;
+                } else {
+                    output.writeln(format!("{}", "错误: -name 需要指定文件名".red()));
+                    parse_error = true;
+                    break;
+                }
+            },
+            "-filter" => {
+                if i + 1 < parts.len() {
+                    search_type = Some("filter");
+                    search_value = Some(&parts[i + 1]);
+                    i += 2;
+                } else {
+                    output.writeln(format!("{}", "错误: -filter 需要指定模式".red()));
+                    parse_error = true;
+                    break;
+                }
+            },
+            "-match" => {
+                if i + 1 < parts.len() {
+                    search_type = Some("match");
+                    search_value = Some(&parts[i + 1]);
+                    i += 2;
+                } else {
+                    output.writeln(format!("{}", "错误: -match 需要指定正则表达式".red()));
+                    parse_error = true;
+                    break;
+                }
+            },
+            "-format" => {
+                if i + 1 < parts.len() {
+                    format_str = Some(&parts[i + 1]);
+                    i += 2;
+                } else {
+                    output.writeln(format!("{}", "错误: -format 需要指定格式字符串".red()));
+                    parse_error = true;
+                    break;
+                }
+            },
+            "-extract" => {
+                if i + 1 < parts.len() {
+                    extract_dir = Some(&parts[i + 1]);
+                    i += 2;
+                } else {
+                    output.writeln(format!("{}", "错误: -extract 需要指定目标目录".red()));
+                    parse_error = true;
+                    break;
+                }
+            },
+            _ => {
+                output.writeln(format!("{}", format!("未知参数: {}", &parts[i]).red()));
+                parse_error = true;
+                break;
+            }
+        }
+    }
+    
+    // 根据解析结果执行相应操作
+    if show_help {
+        show_find_help(output);
+    } else if parse_error {
+        // 参数解析错误，错误信息已经输出
+    } else if let Some(extract_path) = extract_dir {
+        // 提取模式：将筛选的文件解包到指定目录
+        match extract_filtered_files(fs, data, extract_path, search_type, search_value.map(|s| s.as_str())) {
+            Ok(count) => {
+                output.writeln(format!("{}", format!("成功提取 {} 个文件到: {}", count, extract_path).green()));
+            }
+            Err(e) => {
+                output.writeln(format!("{}", format!("提取失败: {}", e).red()));
+            }
+        }
+    } else {
+        // 执行find命令
+        match search_type {
+            Some("name") => {
+                if let Some(filename) = search_value {
+                    find_by_name_to_buffer_with_format(fs, filename.as_str(), format_str.map(|s| s.as_str()), output);
+                }
+            },
+            Some("filter") => {
+                if let Some(pattern) = search_value {
+                    find_by_pattern_to_buffer_with_format(fs, pattern.as_str(), format_str.map(|s| s.as_str()), output);
+                }
+            },
+            Some("match") => {
+                if let Some(regex_pattern) = search_value {
+                    find_by_regex_to_buffer_with_format(fs, regex_pattern.as_str(), format_str.map(|s| s.as_str()), output);
+                }
+            },
+            None => {
+                // 没有搜索条件，列出当前目录所有文件
+                find_all_files_in_path_to_buffer_with_format(fs, &fs.current_path, format_str.map(|s| s.as_str()), output);
+            },
+            _ => {
+                output.writeln("用法:".to_string());
+                output.writeln("  find [-format \"格式\"]                    列出当前目录下所有文件".to_string());
+                output.writeln("  find -name <filename> [-format \"格式\"]   查找指定文件名".to_string());
+                output.writeln("  find -filter <pattern> [-format \"格式\"]  根据通配符查找文件".to_string());
+                output.writeln("支持的通配符: * ? [abc] [a-z] [!abc]".to_string());
+                output.writeln("格式变量:".to_string());
+                output.writeln("  $path   - 文件完整路径".to_string());
+                output.writeln("  $name   - 文件名（不含路径）".to_string());
+                output.writeln("  $dir    - 目录路径".to_string());
+                output.writeln("  $size   - 文件大小（压缩后）".to_string());
+                output.writeln("  $osize  - 原始文件大小".to_string());
+                output.writeln("示例: find -format \"$path -- $size bytes\"".to_string());
+            }
+        }
+    }
+    
+    Ok(())
+}
+
 /// 运行交互式REPL模式
 pub fn run_repl(pak_path: &Path) -> io::Result<()> {
     println!("进入交互模式...");
@@ -379,140 +664,12 @@ pub fn run_repl(pak_path: &Path) -> io::Result<()> {
                 let mut output = OutputBuffer::new();
                 
                 let result: io::Result<()> = match command {
-                    "help" | "h" => {
-                        show_help_to_buffer(&mut output);
-                        Ok(())
-                    },
                     "exit" | "quit" | "q" => {
                         println!("再见！");
                         break;
                     },
-                    "ls" | "dir" => {
-                        let target_path = if parts.len() > 1 {
-                            &parts[1]
-                        } else {
-                            ""
-                        };
-                        
-                        list_directory_to_buffer(&fs, target_path, &mut output);
-                        Ok(())
-                    },
-                    "cd" => {
-                        if parts.len() > 1 {
-                            match fs.change_directory(&parts[1]) {
-                                Ok(_) => Ok(()),
-                                Err(e) => {
-                                    output.writeln(format!("错误: {}", e));
-                                    Ok(())
-                                }
-                            }
-                        } else {
-                            fs.current_path = "/".to_string();
-                            Ok(())
-                        }
-                    },
-                    "find" => {
-                        let mut format_str = None;
-                        let mut search_type = None;
-                        let mut search_value = None;
-                        let mut show_help = false;
-                        let mut parse_error = false;
-                        
-                        // 解析find命令参数
-                        let mut i = 1;
-                        while i < parts.len() {
-                            match parts[i].as_str() {
-                                "-help" | "--help" => {
-                                    show_help = true;
-                                    break;
-                                },
-                                "-name" => {
-                                    if i + 1 < parts.len() {
-                                        search_type = Some("name");
-                                        search_value = Some(&parts[i + 1]);
-                                        i += 2;
-                                    } else {
-                                        output.writeln(format!("{}", "错误: -name 需要指定文件名".red()));
-                                        parse_error = true;
-                                        break;
-                                    }
-                                },
-                                "-filter" => {
-                                    if i + 1 < parts.len() {
-                                        search_type = Some("filter");
-                                        search_value = Some(&parts[i + 1]);
-                                        i += 2;
-                                    } else {
-                                        output.writeln(format!("{}", "错误: -filter 需要指定模式".red()));
-                                        parse_error = true;
-                                        break;
-                                    }
-                                },
-                                "-format" => {
-                                    if i + 1 < parts.len() {
-                                        format_str = Some(&parts[i + 1]);
-                                        i += 2;
-                                    } else {
-                                        output.writeln(format!("{}", "错误: -format 需要指定格式字符串".red()));
-                                        parse_error = true;
-                                        break;
-                                    }
-                                },
-                                _ => {
-                                    output.writeln(format!("{}", format!("未知参数: {}", &parts[i]).red()));
-                                    parse_error = true;
-                                    break;
-                                }
-                            }
-                        }
-                        
-                        // 根据解析结果执行相应操作
-                        if show_help {
-                            show_find_help(&mut output);
-                        } else if parse_error {
-                            // 参数解析错误，错误信息已经输出
-                        } else {
-                            // 执行find命令
-                            match search_type {
-                                Some("name") => {
-                                    if let Some(filename) = search_value {
-                                        find_by_name_to_buffer_with_format(&fs, filename.as_str(), format_str.map(|s| s.as_str()), &mut output);
-                                    }
-                                },
-                                Some("filter") => {
-                                    if let Some(pattern) = search_value {
-                                        find_by_pattern_to_buffer_with_format(&fs, pattern.as_str(), format_str.map(|s| s.as_str()), &mut output);
-                                    }
-                                },
-                                None => {
-                                    // 没有搜索条件，列出当前目录所有文件
-                                    find_all_files_in_path_to_buffer_with_format(&fs, &fs.current_path, format_str.map(|s| s.as_str()), &mut output);
-                                },
-                                _ => {
-                                    output.writeln("用法:".to_string());
-                                    output.writeln("  find [-format \"格式\"]                    列出当前目录下所有文件".to_string());
-                                    output.writeln("  find -name <filename> [-format \"格式\"]   查找指定文件名".to_string());
-                                    output.writeln("  find -filter <pattern> [-format \"格式\"]  根据通配符查找文件".to_string());
-                                    output.writeln("支持的通配符: * ? [abc] [a-z] [!abc]".to_string());
-                                    output.writeln("格式变量:".to_string());
-                                    output.writeln("  $path   - 文件完整路径".to_string());
-                                    output.writeln("  $name   - 文件名（不含路径）".to_string());
-                                    output.writeln("  $dir    - 目录路径".to_string());
-                                    output.writeln("  $size   - 文件大小（压缩后）".to_string());
-                                    output.writeln("  $osize  - 原始文件大小".to_string());
-                                    output.writeln("示例: find -format \"$path -- $size bytes\"".to_string());
-                                }
-                            }
-                        }
-                        Ok(())
-                    },
-                    "info" => {
-                        show_pak_info_to_buffer(&data, encrypted, &fs.files, &mut output);
-                        Ok(())
-                    },
                     _ => {
-                        output.writeln(format!("{}", format!("未知命令: {}. 输入 'help' 查看可用命令", command).red()));
-                        Ok(())
+                        execute_command(&mut fs, &data, encrypted, &parts, &mut output)
                     }
                 };
                 
@@ -560,6 +717,7 @@ fn show_help_to_buffer(output: &mut OutputBuffer) {
     output.writeln(format!("  {}               显示find命令详细帮助", "find -help".bright_green()));
     output.writeln(format!("  {}    查找指定文件名", "find -name <filename>".bright_green()));
     output.writeln(format!("  {}   根据通配符查找文件", "find -filter <pattern>".bright_green()));
+    output.writeln(format!("  {}     根据正则表达式查找文件", "find -match <regex>".bright_green()));
     output.writeln(format!("    支持通配符: {}", "* ? [abc] [a-z] [!abc]".yellow()));
     output.writeln(format!("    示例: {} 或 {}", "find -filter /compiled/*".yellow(), "find -filter *.jpg".yellow()));
     output.writeln(format!("  {}                     显示PAK文件信息", "info".bright_green()));
@@ -578,7 +736,9 @@ fn show_find_help(output: &mut OutputBuffer) {
     output.writeln(format!("  {}            显示此帮助信息", "-help, --help".bright_green()));
     output.writeln(format!("  {}           按确切文件名查找", "-name <文件名>".bright_green()));
     output.writeln(format!("  {}           按通配符模式查找", "-filter <模式>".bright_green()));
+    output.writeln(format!("  {}         按正则表达式查找", "-match <正则表达式>".bright_green()));
     output.writeln(format!("  {}     自定义输出格式", "-format <格式字符串>".bright_green()));
+    output.writeln(format!("  {}       将筛选的文件解包到指定目录", "-extract <目录>".bright_green()));
     output.writeln("".to_string());
     output.writeln(format!("{}", "通配符:".bright_cyan()));
     output.writeln(format!("  {}              匹配任意数量的字符", "*".yellow()));
@@ -587,12 +747,29 @@ fn show_find_help(output: &mut OutputBuffer) {
     output.writeln(format!("  {}          匹配指定范围内的字符", "[a-z]".yellow()));
     output.writeln(format!("  {}         匹配不在方括号中的字符", "[!abc]".yellow()));
     output.writeln("".to_string());
+    output.writeln(format!("{}", "正则表达式:".bright_cyan()));
+    output.writeln(format!("  {}              匹配字符串开头", "^".yellow()));
+    output.writeln(format!("  {}              匹配字符串结尾", "$".yellow()));
+    output.writeln(format!("  {}              匹配任意字符", ".".yellow()));
+    output.writeln(format!("  {}             匹配0个或多个前面的字符", "*".yellow()));
+    output.writeln(format!("  {}             匹配1个或多个前面的字符", "+".yellow()));
+    output.writeln(format!("  {}             匹配0个或1个前面的字符", "?".yellow()));
+    output.writeln(format!("  {}          字符类（或）", "(abc|def)".yellow()));
+    output.writeln(format!("  {}             字符集", "[abc]".yellow()));
+    output.writeln(format!("  {}            字符范围", "[a-z]".yellow()));
+    output.writeln(format!("  {}             否定字符集", "[^abc]".yellow()));
+    output.writeln(format!("  {}            转义特殊字符", "\\.".yellow()));
+    output.writeln("".to_string());
     output.writeln(format!("{}", "格式变量:".bright_cyan()));
     output.writeln(format!("  {}          文件的完整路径", "$path".magenta()));
     output.writeln(format!("  {}          文件名（不含路径）", "$name".magenta()));
     output.writeln(format!("  {}           文件所在目录路径", "$dir".magenta()));
     output.writeln(format!("  {}          文件大小（压缩后，字节）", "$size".magenta()));
     output.writeln(format!("  {}         原始文件大小（字节）", "$osize".magenta()));
+    output.writeln(format!("  {}           正则表达式完整匹配", "$0".magenta()));
+    output.writeln(format!("  {}           正则表达式第1个捕获组", "$1".magenta()));
+    output.writeln(format!("  {}           正则表达式第2个捕获组", "$2".magenta()));
+    output.writeln(format!("  {}           正则表达式第N个捕获组", "$N".magenta()));
     output.writeln("".to_string());
     output.writeln(format!("{}", "使用示例:".bright_cyan()));
     output.writeln("".to_string());
@@ -603,18 +780,35 @@ fn show_find_help(output: &mut OutputBuffer) {
     output.writeln(format!("   {}          # 查找compiled目录下所有文件", "find -filter /compiled/*".yellow()));
     output.writeln(format!("   {}      # 查找data目录下以数字开头的txt文件", "find -filter data/[0-9]*.txt".yellow()));
     output.writeln("".to_string());
-    output.writeln(format!("{}", "2. 自定义格式输出:".bright_white()));
+    output.writeln(format!("{}", "2. 正则表达式查找:".bright_white()));
+    output.writeln(format!("   {}                  # 查找所有jpg或png文件", "find -match \"\\.(jpg|png)$\"".yellow()));
+    output.writeln(format!("   {}              # 查找以data开头的文件", "find -match \"^data.*\"".yellow()));
+    output.writeln(format!("   {}    # 在compiled目录查找包含sound的文件", "find -match \"/compiled/.*sound.*\"".yellow()));
+    output.writeln(format!("   {}         # 查找以数字结尾的xml文件", "find -match \".*\\d+\\.xml$\"".yellow()));
+    output.writeln("".to_string());
+    output.writeln(format!("{}", "3. 自定义格式输出:".bright_white()));
     output.writeln(format!("   {}               # 默认格式，显示完整路径", "find -format \"$path\"".yellow()));
     output.writeln(format!("   {}               # 仅显示文件名", "find -format \"$name\"".yellow()));
     output.writeln(format!("   {} # 显示路径和大小", "find -format \"$path -- $size bytes\"".yellow()));
     output.writeln(format!("   {}      # 显示文件名和原始大小", "find -format \"$name ($osize)\"".yellow()));
     output.writeln(format!("   {}          # 显示目录/文件名格式", "find -format \"$dir/$name\"".yellow()));
     output.writeln("".to_string());
-    output.writeln(format!("{}", "3. 组合使用:".bright_white()));
+    output.writeln(format!("{}", "4. 组合使用:".bright_white()));
     output.writeln(format!("   {}", "find -name \"*.jpg\" -format \"$name in $dir - $size bytes\"".yellow()));
     output.writeln(format!("   {}", "find -filter \"config*\" -format \"$path,$size,$osize\"".yellow()));
+    output.writeln(format!("   {}", "find -match \"\\.(wav|ogg)$\" -format \"$name: $size bytes\"".yellow()));
     output.writeln("".to_string());
-    output.writeln(format!("{}", "4. 输出重定向:".bright_white()));
+    output.writeln(format!("{}", "5. 正则表达式捕获组:".bright_white()));
+    output.writeln(format!("   {}          # 提取ogg文件名（不含扩展名）", "find -match \"^(.*)\\\\.ogg$\" -format \"$1\"".yellow()));
+    output.writeln(format!("   {}      # 提取compiled目录下的相对路径", "find -match \"^compiled/(.*)\" -format \"$1\"".yellow()));
+    output.writeln(format!("   {}        # 提取文件的扩展名", "find -match \".*\\\\.(.+)$\" -format \"$1\"".yellow()));
+    output.writeln("".to_string());
+    output.writeln(format!("{}", "6. 文件提取:".bright_white()));
+    output.writeln(format!("   {}                    # 提取所有ogg文件", "find -filter \"*.ogg\" -extract sounds".yellow()));
+    output.writeln(format!("   {}             # 提取compiled目录", "find -match \"^compiled/\" -extract output".yellow()));
+    output.writeln(format!("   {}    # 提取特定文件", "find -name \"config.xml\" -extract configs".yellow()));
+    output.writeln("".to_string());
+    output.writeln(format!("{}", "7. 输出重定向:".bright_white()));
     output.writeln(format!("   {}", "find -format \"$path,$size,$osize\" > files.csv".yellow()));
     output.writeln(format!("   {}", "find -filter \"*.xml\" > xml_files.txt".yellow()));
     output.writeln("".to_string());
@@ -623,6 +817,8 @@ fn show_find_help(output: &mut OutputBuffer) {
     output.writeln(format!("- 绝对路径以 {} 开头，相对路径基于当前目录", "/".yellow()));
     output.writeln(format!("- 目录项的 {} 和 {} 显示为 {}", "$size".magenta(), "$osize".magenta(), "<DIR>".yellow()));
     output.writeln(format!("- 所有输出都可以通过 {} 重定向到文件", "> filename".yellow()));
+    output.writeln(format!("- 使用 {} 时将保持原有的相对路径结构", "-extract".yellow()));
+    output.writeln(format!("- {} 模式下不输出任何内容，只提取文件", "-extract".yellow()));
 }
 
 /// 列出目录内容到缓冲区
@@ -639,7 +835,8 @@ fn list_directory_to_buffer(fs: &PakFileSystem, target_path: &str, output: &mut 
     
     // 再显示文件
     for file in files {
-        let file_name = file.file_name.split('\\').last().unwrap_or(&file.file_name);
+        let file_name_unix = file.file_name.replace('\\', "/");
+        let file_name = file_name_unix.split('/').last().unwrap_or(&file_name_unix);
         output.writeln(format!("{}", file_name.bright_white()));
     }
     
@@ -678,7 +875,7 @@ fn find_all_files_in_path(fs: &PakFileSystem, base_path: &str) {
     }
     
     for file in found_files {
-        println!("{}", file.file_name);
+        println!("{}", file.file_name.replace('\\', "/"));
     }
 }
 
@@ -712,7 +909,7 @@ fn find_all_files_in_path_to_buffer(fs: &PakFileSystem, base_path: &str, output:
     }
     
     for file in found_files {
-        output.writeln(file.file_name.clone());
+        output.writeln(file.file_name.replace('\\', "/"));
     }
 }
 
@@ -812,12 +1009,12 @@ fn find_by_name(fs: &PakFileSystem, filename: &str) {
     let mut sorted_dirs: Vec<String> = found_dirs.into_iter().collect();
     sorted_dirs.sort();
     for dir in sorted_dirs {
-        println!("{}", dir);
+        println!("{}", dir.replace('\\', "/"));
     }
     
     // 再显示文件
     for file in found_files {
-        println!("{}", file.file_name);
+        println!("{}", file.file_name.replace('\\', "/"));
     }
 }
 
@@ -882,12 +1079,12 @@ fn find_by_name_to_buffer(fs: &PakFileSystem, filename: &str, output: &mut Outpu
     let mut sorted_dirs: Vec<String> = found_dirs.into_iter().collect();
     sorted_dirs.sort();
     for dir in sorted_dirs {
-        output.writeln(dir);
+        output.writeln(dir.replace('\\', "/"));
     }
     
     // 再显示文件
     for file in found_files {
-        output.writeln(file.file_name.clone());
+        output.writeln(file.file_name.replace('\\', "/"));
     }
 }
 
@@ -990,7 +1187,7 @@ fn find_by_pattern(fs: &PakFileSystem, pattern: &str) {
     }
     
     for file in found {
-        println!("{}", file.file_name);
+        println!("{}", file.file_name.replace('\\', "/"));
     }
 }
 
@@ -1021,7 +1218,7 @@ fn find_by_pattern_to_buffer(fs: &PakFileSystem, pattern: &str, output: &mut Out
     }
     
     for file in found {
-        output.writeln(file.file_name.clone());
+        output.writeln(file.file_name.replace('\\', "/"));
     }
 }
 
@@ -1054,6 +1251,57 @@ fn find_by_pattern_to_buffer_with_format(fs: &PakFileSystem, pattern: &str, form
     for file in found {
         let formatted = format_file_info(file, format_str);
         output.writeln(formatted);
+    }
+}
+
+/// 根据正则表达式查找文件和目录到缓冲区（带格式化）
+fn find_by_regex_to_buffer_with_format(fs: &PakFileSystem, regex_pattern: &str, format_str: Option<&str>, output: &mut OutputBuffer) {
+    // 编译正则表达式
+    let regex = match Regex::new(regex_pattern) {
+        Ok(r) => r,
+        Err(e) => {
+            output.writeln(format!("{}", format!("正则表达式错误: {}", e).red()));
+            return;
+        }
+    };
+    
+    // 先输出匹配的目录
+    let mut all_dirs = std::collections::HashSet::new();
+    
+    for file in &fs.files {
+        let unix_path = file.file_name.replace('\\', "/");
+        let path_parts: Vec<&str> = unix_path.split('/').collect();
+        
+        // 为每个文件路径生成所有可能的目录路径
+        for i in 0..path_parts.len()-1 {
+            let dir_path = path_parts[..=i].join("/");
+            all_dirs.insert(dir_path);
+        }
+    }
+    
+    // 对每个目录路径进行正则匹配
+    let mut matched_dir_strings = Vec::new();
+    for dir in all_dirs {
+        if let Some(captures) = regex.captures(&dir) {
+            let formatted = format_dir_info_with_captures(&dir.replace('/', "\\"), format_str, Some(&captures));
+            matched_dir_strings.push((dir.replace('/', "\\"), formatted));
+        }
+    }
+    
+    // 排序并输出目录
+    matched_dir_strings.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_, formatted) in matched_dir_strings {
+        output.writeln(formatted);
+    }
+    
+    // 再输出匹配的文件
+    for file in &fs.files {
+        let unix_path = file.file_name.replace('\\', "/");
+        
+        if let Some(captures) = regex.captures(&unix_path) {
+            let formatted = format_file_info_with_captures(file, format_str, Some(&captures));
+            output.writeln(formatted);
+        }
     }
 }
 
@@ -1186,4 +1434,167 @@ fn detect_encryption(data: &[u8]) -> bool {
     // 检查magic number（PC版本应该是0xBAC04AC0）
     let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
     magic != 0xBAC04AC0
-} 
+}
+
+/// 提取筛选的文件到指定目录
+fn extract_filtered_files(
+    fs: &PakFileSystem, 
+    pak_data: &[u8], 
+    extract_dir: &str,
+    search_type: Option<&str>,
+    search_value: Option<&str>
+) -> io::Result<usize> {
+    // 解析PAK信息来获取文件数据偏移
+    let (_pak_info, header_size) = parse_pak_info(pak_data)?;
+    
+    // 根据搜索条件筛选文件
+    let filtered_files = match search_type {
+        Some("name") => {
+            if let Some(filename) = search_value {
+                filter_files_by_name(fs, filename)
+            } else {
+                Vec::new()
+            }
+        },
+        Some("filter") => {
+            if let Some(pattern) = search_value {
+                filter_files_by_pattern(fs, pattern)
+            } else {
+                Vec::new()
+            }
+        },
+        Some("match") => {
+            if let Some(regex_pattern) = search_value {
+                filter_files_by_regex(fs, regex_pattern)?
+            } else {
+                Vec::new()
+            }
+        },
+        None => {
+            // 没有搜索条件，提取当前目录下的所有文件
+            filter_files_in_current_path(fs)
+        },
+        _ => Vec::new()
+    };
+    
+    if filtered_files.is_empty() {
+        return Ok(0);
+    }
+    
+    // 创建输出目录
+    fs::create_dir_all(extract_dir)?;
+    
+    // 提取文件
+    let mut file_offset = header_size;
+    let mut extracted_count = 0;
+    
+    for file_info in &fs.files {
+        // 检查这个文件是否在筛选列表中
+        let should_extract = filtered_files.iter().any(|f| f.file_name == file_info.file_name);
+        
+        if should_extract {
+            // 检查数据边界
+            if file_offset + file_info.z_size as usize > pak_data.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("文件 {} 数据超出PAK文件边界", file_info.file_name)
+                ));
+            }
+            
+            // 读取文件数据
+            let file_data = &pak_data[file_offset..file_offset + file_info.z_size as usize];
+            
+            // 创建输出文件路径，保持相对路径
+            let output_file_path = Path::new(extract_dir).join(&file_info.file_name);
+            ensure_directory_exists(&output_file_path)?;
+            
+            // 写入文件
+            let mut output_file = File::create(&output_file_path)?;
+            output_file.write_all(file_data)?;
+            
+            extracted_count += 1;
+        }
+        
+        file_offset += file_info.z_size as usize;
+    }
+    
+    Ok(extracted_count)
+}
+
+/// 根据文件名筛选文件
+fn filter_files_by_name<'a>(fs: &'a PakFileSystem, filename: &str) -> Vec<&'a FileInfo> {
+    let mut result = Vec::new();
+    
+    for file in &fs.files {
+        let unix_path = file.file_name.replace('\\', "/");
+        let file_basename = unix_path.split('/').last().unwrap_or(&unix_path);
+        if file_basename == filename {
+            result.push(file);
+        }
+    }
+    
+    result
+}
+
+/// 根据通配符模式筛选文件
+fn filter_files_by_pattern<'a>(fs: &'a PakFileSystem, pattern: &str) -> Vec<&'a FileInfo> {
+    let mut result = Vec::new();
+    
+    for file in &fs.files {
+        let unix_path = file.file_name.replace('\\', "/");
+        if matches_glob_pattern(&unix_path, pattern) {
+            result.push(file);
+        }
+    }
+    
+    result
+}
+
+/// 根据正则表达式筛选文件
+fn filter_files_by_regex<'a>(fs: &'a PakFileSystem, regex_pattern: &str) -> io::Result<Vec<&'a FileInfo>> {
+    let regex = Regex::new(regex_pattern).map_err(|e| {
+        io::Error::new(io::ErrorKind::InvalidInput, format!("正则表达式错误: {}", e))
+    })?;
+    
+    let mut result = Vec::new();
+    
+    for file in &fs.files {
+        let unix_path = file.file_name.replace('\\', "/");
+        if regex.is_match(&unix_path) {
+            result.push(file);
+        }
+    }
+    
+    Ok(result)
+}
+
+/// 筛选当前路径下的所有文件
+fn filter_files_in_current_path<'a>(fs: &'a PakFileSystem) -> Vec<&'a FileInfo> {
+    let prefix = if fs.current_path == "/" {
+        ""
+    } else {
+        &fs.current_path[1..]
+    };
+    
+    let mut result = Vec::new();
+    
+    for file in &fs.files {
+        let file_path = &file.file_name;
+        
+        if prefix.is_empty() {
+            // 根目录，包含所有文件
+            result.push(file);
+        } else {
+            // 检查文件是否在指定路径下
+            let normalized_prefix = prefix.replace('/', "\\");
+            if file_path.starts_with(&normalized_prefix) {
+                let remaining = &file_path[normalized_prefix.len()..];
+                if remaining.starts_with('\\') || remaining.is_empty() {
+                    result.push(file);
+                }
+            }
+        }
+    }
+    
+    result
+}
