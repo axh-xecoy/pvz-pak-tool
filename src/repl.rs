@@ -403,7 +403,6 @@ pub fn run_batch_commands(pak_path: &Path, commands: &[String]) -> io::Result<()
             continue;
         }
         
-        let command = &parts[0];
         let mut output = OutputBuffer::new();
         
         // 执行命令（复用REPL中的命令处理逻辑）
@@ -691,21 +690,7 @@ pub fn run_repl(pak_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// 显示帮助信息
-fn show_help() {
-    println!("可用命令:");
-    println!("  help, h                  显示此帮助信息");
-    println!("  ls [path]                列出目录内容 (支持相对/绝对路径)");
-    println!("  cd <path>                切换目录 (支持 .., ./, ../, /abs/path, rel/path)");
-    println!("  find                     列出当前目录下所有文件");
-    println!("  find -name <filename>    查找指定文件名");
-    println!("  find -filter <pattern>   根据通配符查找文件");
-    println!("    支持通配符: * ? [abc] [a-z] [!abc]");
-    println!("    示例: find -filter /compiled/* 或 find -filter *.jpg");
-    println!("  info                     显示PAK文件信息");
-    println!("  exit, quit, q            退出程序");
-    println!("  [command] > file.txt     重定向输出到文件");
-}
+
 
 /// 显示帮助信息到缓冲区
 fn show_help_to_buffer(output: &mut OutputBuffer) {
@@ -845,73 +830,9 @@ fn list_directory_to_buffer(fs: &PakFileSystem, target_path: &str, output: &mut 
     }
 }
 
-/// 列出指定路径下的所有文件（包括子目录）
-fn find_all_files_in_path(fs: &PakFileSystem, base_path: &str) {
-    let resolved_path = fs.resolve_path(base_path);
-    let prefix = if resolved_path == "/" {
-        ""
-    } else {
-        &resolved_path[1..]
-    };
-    
-    let mut found_files = Vec::new();
-    
-    for file in &fs.files {
-        let file_path = &file.file_name;
-        
-        if prefix.is_empty() {
-            // 根目录，包含所有文件
-            found_files.push(file);
-        } else {
-            // 检查文件是否在指定路径下
-            let normalized_prefix = prefix.replace('/', "\\");
-            if file_path.starts_with(&normalized_prefix) {
-                let remaining = &file_path[normalized_prefix.len()..];
-                if remaining.starts_with('\\') || remaining.is_empty() {
-                    found_files.push(file);
-                }
-            }
-        }
-    }
-    
-    for file in found_files {
-        println!("{}", file.file_name.replace('\\', "/"));
-    }
-}
 
-/// 列出指定路径下的所有文件（包括子目录）到缓冲区
-fn find_all_files_in_path_to_buffer(fs: &PakFileSystem, base_path: &str, output: &mut OutputBuffer) {
-    let resolved_path = fs.resolve_path(base_path);
-    let prefix = if resolved_path == "/" {
-        ""
-    } else {
-        &resolved_path[1..]
-    };
-    
-    let mut found_files = Vec::new();
-    
-    for file in &fs.files {
-        let file_path = &file.file_name;
-        
-        if prefix.is_empty() {
-            // 根目录，包含所有文件
-            found_files.push(file);
-        } else {
-            // 检查文件是否在指定路径下
-            let normalized_prefix = prefix.replace('/', "\\");
-            if file_path.starts_with(&normalized_prefix) {
-                let remaining = &file_path[normalized_prefix.len()..];
-                if remaining.starts_with('\\') || remaining.is_empty() {
-                    found_files.push(file);
-                }
-            }
-        }
-    }
-    
-    for file in found_files {
-        output.writeln(file.file_name.replace('\\', "/"));
-    }
-}
+
+
 
 /// 列出指定路径下的所有文件（包括子目录）到缓冲区（带格式化）
 fn find_all_files_in_path_to_buffer_with_format(fs: &PakFileSystem, base_path: &str, format_str: Option<&str>, output: &mut OutputBuffer) {
@@ -948,145 +869,9 @@ fn find_all_files_in_path_to_buffer_with_format(fs: &PakFileSystem, base_path: &
     }
 }
 
-/// 根据文件名查找文件和目录（限制在当前路径下）
-fn find_by_name(fs: &PakFileSystem, filename: &str) {
-    let current_prefix = if fs.current_path == "/" {
-        ""
-    } else {
-        &fs.current_path[1..]
-    };
-    
-    let mut found_files = Vec::new();
-    let mut found_dirs = std::collections::HashSet::new();
-    
-    // 查找文件
-    for file in &fs.files {
-        let file_path = &file.file_name;
-        
-        // 检查文件是否在当前目录下
-        let file_in_current_path = if current_prefix.is_empty() {
-            true // 根目录，包含所有文件
-        } else {
-            let normalized_prefix = current_prefix.replace('/', "\\");
-            file_path.starts_with(&normalized_prefix) && 
-            (file_path.len() == normalized_prefix.len() || 
-             file_path.chars().nth(normalized_prefix.len()) == Some('\\'))
-        };
-        
-        if file_in_current_path {
-                         // 检查文件名
-             let relative_path = if current_prefix.is_empty() {
-                 file_path.as_str()
-             } else {
-                 let normalized_prefix = current_prefix.replace('/', "\\");
-                 let remaining = &file_path[normalized_prefix.len()..];
-                 remaining.strip_prefix('\\').unwrap_or(remaining)
-             };
-            
-            let file_basename = relative_path.split('\\').last().unwrap_or(relative_path);
-            if file_basename == filename {
-                found_files.push(file);
-            }
-            
-            // 查找目录名（仅在相对路径中）
-            let path_parts: Vec<&str> = relative_path.split('\\').collect();
-            for (i, part) in path_parts.iter().enumerate() {
-                if *part == filename {
-                    // 构建完整目录路径
-                    let relative_dir_path = path_parts[0..=i].join("\\");
-                    let full_dir_path = if current_prefix.is_empty() {
-                        relative_dir_path
-                    } else {
-                        format!("{}\\{}", current_prefix.replace('/', "\\"), relative_dir_path)
-                    };
-                    found_dirs.insert(full_dir_path);
-                }
-            }
-        }
-    }
-    
-    // 先显示目录
-    let mut sorted_dirs: Vec<String> = found_dirs.into_iter().collect();
-    sorted_dirs.sort();
-    for dir in sorted_dirs {
-        println!("{}", dir.replace('\\', "/"));
-    }
-    
-    // 再显示文件
-    for file in found_files {
-        println!("{}", file.file_name.replace('\\', "/"));
-    }
-}
 
-/// 根据文件名查找文件和目录（限制在当前路径下）到缓冲区
-fn find_by_name_to_buffer(fs: &PakFileSystem, filename: &str, output: &mut OutputBuffer) {
-    let current_prefix = if fs.current_path == "/" {
-        ""
-    } else {
-        &fs.current_path[1..]
-    };
-    
-    let mut found_files = Vec::new();
-    let mut found_dirs = std::collections::HashSet::new();
-    
-    // 查找文件
-    for file in &fs.files {
-        let file_path = &file.file_name;
-        
-        // 检查文件是否在当前目录下
-        let file_in_current_path = if current_prefix.is_empty() {
-            true // 根目录，包含所有文件
-        } else {
-            let normalized_prefix = current_prefix.replace('/', "\\");
-            file_path.starts_with(&normalized_prefix) && 
-            (file_path.len() == normalized_prefix.len() || 
-             file_path.chars().nth(normalized_prefix.len()) == Some('\\'))
-        };
-        
-        if file_in_current_path {
-            // 检查文件名
-            let relative_path = if current_prefix.is_empty() {
-                file_path.as_str()
-            } else {
-                let normalized_prefix = current_prefix.replace('/', "\\");
-                let remaining = &file_path[normalized_prefix.len()..];
-                remaining.strip_prefix('\\').unwrap_or(remaining)
-            };
-            
-            let file_basename = relative_path.split('\\').last().unwrap_or(relative_path);
-            if file_basename == filename {
-                found_files.push(file);
-            }
-            
-            // 查找目录名（仅在相对路径中）
-            let path_parts: Vec<&str> = relative_path.split('\\').collect();
-            for (i, part) in path_parts.iter().enumerate() {
-                if *part == filename {
-                    // 构建完整目录路径
-                    let relative_dir_path = path_parts[0..=i].join("\\");
-                    let full_dir_path = if current_prefix.is_empty() {
-                        relative_dir_path
-                    } else {
-                        format!("{}\\{}", current_prefix.replace('/', "\\"), relative_dir_path)
-                    };
-                    found_dirs.insert(full_dir_path);
-                }
-            }
-        }
-    }
-    
-    // 先显示目录
-    let mut sorted_dirs: Vec<String> = found_dirs.into_iter().collect();
-    sorted_dirs.sort();
-    for dir in sorted_dirs {
-        output.writeln(dir.replace('\\', "/"));
-    }
-    
-    // 再显示文件
-    for file in found_files {
-        output.writeln(file.file_name.replace('\\', "/"));
-    }
-}
+
+
 
 /// 根据文件名查找文件和目录（限制在当前路径下）到缓冲区（带格式化）
 fn find_by_name_to_buffer_with_format(fs: &PakFileSystem, filename: &str, format_str: Option<&str>, output: &mut OutputBuffer) {
@@ -1160,67 +945,9 @@ fn find_by_name_to_buffer_with_format(fs: &PakFileSystem, filename: &str, format
     }
 }
 
-/// 根据通配符模式查找文件
-fn find_by_pattern(fs: &PakFileSystem, pattern: &str) {
-    let mut found = Vec::new();
-    
-    // 如果模式以/开头，从根目录搜索；否则基于当前路径搜索
-    let search_pattern = if pattern.starts_with('/') {
-        // 移除开头的/，因为PAK文件路径不以/开头
-        pattern[1..].to_string()
-    } else {
-        // 相对路径，添加当前路径前缀
-        if fs.current_path == "/" {
-            pattern.to_string()
-        } else {
-            format!("{}/{}", &fs.current_path[1..], pattern)
-        }
-    };
-    
-    // 将模式中的/转换为\以匹配PAK文件路径格式
-    let normalized_pattern = search_pattern.replace('/', "\\");
-    
-    for file in &fs.files {
-        if matches_glob_pattern(&file.file_name, &normalized_pattern) {
-            found.push(file);
-        }
-    }
-    
-    for file in found {
-        println!("{}", file.file_name.replace('\\', "/"));
-    }
-}
 
-/// 根据通配符模式查找文件到缓冲区
-fn find_by_pattern_to_buffer(fs: &PakFileSystem, pattern: &str, output: &mut OutputBuffer) {
-    let mut found = Vec::new();
-    
-    // 如果模式以/开头，从根目录搜索；否则基于当前路径搜索
-    let search_pattern = if pattern.starts_with('/') {
-        // 移除开头的/，因为PAK文件路径不以/开头
-        pattern[1..].to_string()
-    } else {
-        // 相对路径，添加当前路径前缀
-        if fs.current_path == "/" {
-            pattern.to_string()
-        } else {
-            format!("{}/{}", &fs.current_path[1..], pattern)
-        }
-    };
-    
-    // 将模式中的/转换为\以匹配PAK文件路径格式
-    let normalized_pattern = search_pattern.replace('/', "\\");
-    
-    for file in &fs.files {
-        if matches_glob_pattern(&file.file_name, &normalized_pattern) {
-            found.push(file);
-        }
-    }
-    
-    for file in found {
-        output.writeln(file.file_name.replace('\\', "/"));
-    }
-}
+
+
 
 /// 根据通配符模式查找文件到缓冲区（带格式化）
 fn find_by_pattern_to_buffer_with_format(fs: &PakFileSystem, pattern: &str, format_str: Option<&str>, output: &mut OutputBuffer) {
