@@ -160,8 +160,7 @@ pub fn pack_to_pak(input_dir: &Path, output_path: &Path) -> io::Result<()> {
     writer.flush()?;
     drop(writer);
     
-    // 加密整个文件
-    println!("正在加密PAK文件...");
+    // 处理文件格式
     let mut pak_data = fs::read(output_path)?;
     crypt_data(&mut pak_data);
     fs::write(output_path, pak_data)?;

@@ -131,8 +131,7 @@ pub fn parse_pak_info(data: &[u8]) -> io::Result<(PakInfo, usize)> {
 }
 
 /// 显示PAK文件简要信息
-pub fn show_pak_info_simple(data: &[u8], is_encrypted: bool, files: &[FileInfo]) {
+pub fn show_pak_info_simple(data: &[u8], _is_encrypted: bool, files: &[FileInfo]) {
     println!("  PAK 文件大小: {:.2} MB", data.len() as f64 / 1024.0 / 1024.0);
-    println!("  加密状态: {}", if is_encrypted { "已加密" } else { "未加密" });
     println!("  文件数量: {}", files.len());
 } 

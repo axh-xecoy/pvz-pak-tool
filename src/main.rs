@@ -4,7 +4,19 @@ use clap::Parser;
 use pvz_pak_tool::cli::Cli;
 use pvz_pak_tool::{pack_to_pak, unpack_pak, run_repl};
 
+#[cfg(windows)]
+use colored::control;
+
 fn main() {
+    // 在Windows上启用终端颜色支持
+    #[cfg(windows)]
+    {
+        if !control::set_virtual_terminal(true).is_ok() {
+            // 如果无法启用虚拟终端，则禁用颜色
+            control::set_override(false);
+        }
+    }
+    
     let cli = Cli::parse();
     
     let result = if let Some(output) = &cli.output {

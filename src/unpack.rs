@@ -42,7 +42,6 @@ pub fn unpack_pak(input_path: &Path, output_dir: &Path) -> io::Result<()> {
     let encrypted = detect_encryption(&data);
     
     if encrypted {
-        println!("检测到加密，正在解密...");
         crypt_data(&mut data);
     }
     

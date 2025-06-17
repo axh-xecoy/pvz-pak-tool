@@ -96,7 +96,7 @@ pub fn read_u64_le(data: &[u8], pos: &mut usize) -> io::Result<u64> {
     Ok(value)
 }
 
-/// XOR加密/解密（PC版PAK使用0xF7密钥）
+/// 数据处理（PC版PAK格式转换）
 pub fn crypt_data(data: &mut [u8]) {
     const KEY: u8 = 0xF7;
     for byte in data.iter_mut() {
